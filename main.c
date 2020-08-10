@@ -5,7 +5,10 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#include "event2/buffer.h"
+#include "event2/bufferevent.h"
 #include "event2/event.h"
+#include "event2/listener.h"
 
 struct timeval TIMEOUT_S = {30, 0};
 
@@ -76,7 +79,7 @@ void cb_read_socket(evutil_socket_t fd, short what, void *arg) {
 }
 
 void cb_accept_conn(evutil_socket_t listener, short what, void *arg) {
-    printf("Got incoming connection!\n");
+    printf("Got incoming connection on :8888!\n");
 
     struct event_base *base = arg;
 
@@ -97,6 +100,38 @@ void cb_accept_conn(evutil_socket_t listener, short what, void *arg) {
     if (event_add(state->event_read_socket, NULL)) {
         perror("Failed to add read socket event\n");
     }
+}
+
+void cb_lev_event(struct bufferevent *bev, short events, void *ctx) {
+    if (events & BEV_EVENT_ERROR) {
+        perror("Error from bufferevent\n");
+    }
+    if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+        printf("Peer disconnected\n");
+        bufferevent_free(bev);
+    }
+}
+
+void cb_lev_read_socket(struct bufferevent *bev, void *ctx) {
+    char buf[1024];
+    size_t num_read = bufferevent_read(bev, &buf, sizeof(buf));
+
+    printf("Read %ld bytes from peer: ", num_read);
+    for (ssize_t i = 0; i < num_read; ++i) {
+        printf("%d ", buf[i]);
+    }
+    printf("\n");
+}
+
+void cb_lev_accept(struct evconnlistener *listener, evutil_socket_t fd,
+                   struct sockaddr* addr, int socklen, void *ctx) {
+    printf("Got incoming connection on :7777!\n");
+
+    struct event_base *base = evconnlistener_get_base(listener);
+    struct bufferevent *bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
+
+    bufferevent_setcb(bev, cb_lev_read_socket, NULL, cb_lev_event, NULL);
+    bufferevent_enable(bev, EV_READ);
 }
 
 int main(int argc, char *argv[]) {
@@ -138,12 +173,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    struct sockaddr_in sin;
-    sin.sin_family = AF_INET;
-    sin.sin_addr.s_addr = 0; // listen on all interfaces
-    sin.sin_port = htons(8888); // listen on :8888
+    struct sockaddr_in sin88;
+    sin88.sin_family = AF_INET;
+    sin88.sin_addr.s_addr = 0; // listen on all interfaces
+    sin88.sin_port = htons(8888); // listen on :8888
 
-    if (bind(listener, (struct sockaddr*) &sin, sizeof(sin)) < 0) {
+    if (bind(listener, (struct sockaddr*) &sin88, sizeof(sin88)) < 0) {
         perror("Failed to bind to :8888\n");
         return 1;
     }
@@ -161,9 +196,25 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Add an evconnlistener that listens on a different port
+    struct sockaddr_in sin77;
+    sin77.sin_family = AF_INET;
+    sin77.sin_addr.s_addr = 0; // listen on all interfaces
+    sin77.sin_port = htons(7777); // listen on :7777
+
+    struct evconnlistener *lev_listener = evconnlistener_new_bind(
+        base, cb_lev_accept, NULL, LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE,
+        backlog_sz, (struct sockaddr*) &sin77, sizeof(sin77)
+    );
+    if (!lev_listener) {
+        perror("Failed to create lev listener\n");
+        return 1;
+    }
+
     printf(
         "Listening for events:\n"
         "- Connections on :8888 - use 'nc localhost 8888', type something and hit Enter\n"
+        "- Connections on :7777 - use 'nc localhost 7777', type something and hit Enter\n"
         "- Timer every 30s\n"
         "- SIGINT (Ctrl+C in terminal)\n"
     );
